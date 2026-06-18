@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, Field
 
 from minicode.tools.base import Tool, ToolResult
+from minicode.tools.diff_gen import generate_diff
 
 if TYPE_CHECKING:
     from minicode.cache import FileCache
@@ -71,4 +72,13 @@ class EditFile(Tool):
         except Exception as e:
             return ToolResult(output=f"Error writing file: {e}", is_error=True)
 
-        return ToolResult(output=f"Successfully edited {params.file_path}")
+        diff_str = None
+        try:
+            diff_str = generate_diff(str(path), content, new_content)
+        except Exception:
+            pass
+
+        return ToolResult(
+            output=f"Successfully edited {params.file_path}",
+            diff=diff_str,
+        )

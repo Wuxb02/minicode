@@ -93,6 +93,7 @@ class ToolResultEvent:
     output: str
     is_error: bool
     elapsed: float
+    diff: str | None = None  # TUI 专用 unified diff，不进入 LLM 上下文
 
 
 @dataclass
@@ -683,6 +684,7 @@ class Agent:
                             output=br.result.output,
                             is_error=br.result.is_error,
                             elapsed=br.elapsed,
+                            diff=br.result.diff,
                         )
                 else:
                     for tc in batch.calls:
@@ -768,6 +770,7 @@ class Agent:
                             output=result.output,
                             is_error=result.is_error,
                             elapsed=elapsed,
+                            diff=result.diff,
                         )
 
             if consecutive_unknown >= 3:

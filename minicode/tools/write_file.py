@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, Field
 
 from minicode.tools.base import Tool, ToolResult
+from minicode.tools.diff_gen import MAX_OLD_CONTENT_BYTES, _is_likely_binary, generate_diff
 
 if TYPE_CHECKING:
     from minicode.cache import FileCache
@@ -37,6 +38,16 @@ class WriteFile(Tool):
 
         path = Path(params.file_path)
 
+        # 读取旧内容用于 diff 生成（仅在文件存在且为文本时）
+        old_content: str | None = None
+        if path.exists():
+            try:
+                old_bytes = path.read_bytes()
+                if len(old_bytes) <= MAX_OLD_CONTENT_BYTES and not _is_likely_binary(old_bytes):
+                    old_content = old_bytes.decode("utf-8", errors="replace")
+            except Exception:
+                pass
+
         if self._state_cache and path.exists():
             resolved = str(path.resolve())
             ok, err_msg = self._state_cache.check(resolved)
@@ -52,4 +63,14 @@ class WriteFile(Tool):
                 self._state_cache.update(str(path.resolve()))
         except Exception as e:
             return ToolResult(output=f"Error writing file: {e}", is_error=True)
-        return ToolResult(output=f"Successfully wrote to {params.file_path}")
+
+        diff_str = None
+        try:
+            diff_str = generate_diff(str(path), old_content, params.content)
+        except Exception:
+            pass
+
+        return ToolResult(
+            output=f"Successfully wrote to {params.file_path}",
+            diff=diff_str,
+        )

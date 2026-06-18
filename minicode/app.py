@@ -331,7 +331,7 @@ def _tool_title(tool_name: str, arguments: dict[str, Any]) -> str:
     return tool_name
 
 
-def _format_detail(tool_name: str, arguments: dict[str, Any], output: str) -> str:
+def _format_detail(tool_name: str, arguments: dict[str, Any], output: str, diff: str | None = None) -> str:
     parts: list[str] = []
 
     if tool_name == "Bash":
@@ -342,11 +342,14 @@ def _format_detail(tool_name: str, arguments: dict[str, Any], output: str) -> st
     elif tool_name in ("ReadFile", "WriteFile", "EditFile"):
         parts.append(f"  {arguments.get('file_path', '')}")
         parts.append("")
-        for line in output.splitlines()[:MAX_TRUNCATED_LINES]:
-            parts.append(f"  {line}")
-        total = output.count("\n") + 1
-        if total > MAX_TRUNCATED_LINES:
-            parts.append(f"  … ({total - MAX_TRUNCATED_LINES} more lines)")
+        if diff:
+            parts.append(_colorize_diff(diff))
+        else:
+            for line in output.splitlines()[:MAX_TRUNCATED_LINES]:
+                parts.append(f"  {line}")
+            total = output.count("\n") + 1
+            if total > MAX_TRUNCATED_LINES:
+                parts.append(f"  … ({total - MAX_TRUNCATED_LINES} more lines)")
     else:
         for line in output.splitlines()[:MAX_TRUNCATED_LINES]:
             parts.append(f"  {line}")
@@ -355,6 +358,56 @@ def _format_detail(tool_name: str, arguments: dict[str, Any], output: str) -> st
             parts.append(f"  … ({total - MAX_TRUNCATED_LINES} more lines)")
 
     return "\n".join(parts)
+
+
+def _colorize_diff(diff_text: str) -> str:
+    """将 unified diff 文本转为带 Rich markup 着色的字符串。
+
+    着色规则（模仿 git diff 终端配色）：
+      - @@ hunk 头部 → 粗体青色
+      - + 新增行 → 绿色
+      - - 删除行 → 红色
+      - --- / +++ 文件头 + 其余上下文行 → 灰色
+    """
+    lines: list[str] = []
+    for line in diff_text.splitlines():
+        escaped = _escape_rich(line)
+        if line.startswith("@@ "):
+            lines.append(f"[bold cyan]  {escaped}[/bold cyan]")
+        elif line.startswith("+++ ") or line.startswith("--- "):
+            lines.append(f"[dim]  {escaped}[/dim]")
+        elif line.startswith("+"):
+            lines.append(f"[green]  {escaped}[/green]")
+        elif line.startswith("-"):
+            lines.append(f"[red]  {escaped}[/red]")
+        else:
+            lines.append(f"[dim]  {escaped}[/dim]")
+    return "\n".join(lines)
+
+
+def _diff_stats(diff_text: str) -> str:
+    """统计 diff 中的增删行数，返回简短摘要如 '[3 −, 1 +]'。
+
+    方括号用 Rich escape 转义，防止被 Textual Static widget 的 markup 解析器误消费。
+    """
+    added = 0
+    removed = 0
+    for line in diff_text.splitlines():
+        if line.startswith("+") and not line.startswith("+++ "):
+            added += 1
+        elif line.startswith("-") and not line.startswith("--- "):
+            removed += 1
+    raw = f"[{removed} −, {added} +]"
+    return _escape_rich(raw)
+
+
+def _escape_rich(text: str) -> str:
+    """转义开方括号防止被 Rich markup 误解析为标签。
+
+    注意：只转义 [ → \\[ 即可。] 在 Rich markup 中单独出现是安全的；
+    只有 [...] 配对才会被当作标签。\\
+    """
+    return text.replace("[", "\\[")
 
 
 class ToolCallBlock(Static, can_focus=True):
@@ -367,6 +420,7 @@ class ToolCallBlock(Static, can_focus=True):
         self._full_output = ""
         self._is_error = False
         self._elapsed = 0.0
+        self._diff_output: str | None = None
         self._collapsed = True
         self._loading = True
         self._render_loading()
@@ -375,10 +429,11 @@ class ToolCallBlock(Static, can_focus=True):
         self.update(f"  ● {self._title} …")
         self.add_class("tool-block-loading")
 
-    def set_result(self, output: str, is_error: bool, elapsed: float) -> None:
+    def set_result(self, output: str, is_error: bool, elapsed: float, diff: str | None = None) -> None:
         self._full_output = output
         self._is_error = is_error
         self._elapsed = elapsed
+        self._diff_output = diff
         self._loading = False
         self._collapsed = True
         self.remove_class("tool-block-loading")
@@ -387,10 +442,13 @@ class ToolCallBlock(Static, can_focus=True):
         self._render_collapsed()
 
     def _render_collapsed(self) -> None:
+        suffix = ""
+        if self._diff_output:
+            suffix = f" {_diff_stats(self._diff_output)}"
         if self._is_error:
-            self.update(f"  ✗ {self._title} ({self._elapsed:.1f}s)")
+            self.update(f"  ✗ {self._title} ({self._elapsed:.1f}s){suffix}")
         else:
-            self.update(f"  ✓ {self._title} ({self._elapsed:.1f}s)")
+            self.update(f"  ✓ {self._title} ({self._elapsed:.1f}s){suffix}")
 
     def _render_expanded(self) -> None:
         if self._is_error:
@@ -398,7 +456,9 @@ class ToolCallBlock(Static, can_focus=True):
         else:
             header = f"  ✓ {self._title} ({self._elapsed:.1f}s)"
         detail = _format_detail(
-            self.tool_name, self._arguments, self._full_output)
+            self.tool_name, self._arguments, self._full_output,
+            diff=self._diff_output,
+        )
         self.update(f"{header}\n{detail}")
 
     def on_click(self) -> None:
@@ -1360,7 +1420,9 @@ class minicodeApp(App):
                     block = tool_blocks.get(event.tool_id)
                     if block:
                         block.set_result(
-                            event.output, event.is_error, event.elapsed)
+                            event.output, event.is_error, event.elapsed,
+                            diff=event.diff,
+                        )
                     self.call_after_refresh(chat.scroll_end, animate=False)
 
                     ask_tool = self.registry.get("AskUserQuestion")

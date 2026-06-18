@@ -17,6 +17,7 @@ ToolCategory = Literal["read", "write", "command"]
 class ToolResult:
     output: str
     is_error: bool = False
+    diff: str | None = None  # TUI 专用 unified diff，不进入 LLM 上下文
 
 
 class Tool(ABC):
