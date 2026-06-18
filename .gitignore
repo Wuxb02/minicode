@@ -33,3 +33,4 @@ build/
 .claude/
 CLAUDE.md
 config.yaml
+AGENTS.md

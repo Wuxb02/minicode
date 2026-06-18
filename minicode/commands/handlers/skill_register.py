@@ -64,6 +64,15 @@ def register_skill_commands(
                             ctx.ui.add_system_message(
                                 f"[{name} skill result]\n{result}"
                             )
+                            # 将 fork 执行结果注入主对话上下文，
+                            # 使主 Agent 知晓 skill 已完成的操作
+                            summary = result[:800]
+                            if len(result) > 800:
+                                summary += "\n...(内容过长已截断)"
+                            ctx.conversation.add_system_reminder(
+                                f"刚刚执行了 /{name} 命令（fork 模式），"
+                                f"该 skill 在独立会话中完成，执行结果概要：\n{summary}"
+                            )
                         except Exception as e:
                             ctx.ui.add_system_message(
                                 f"Skill {name} failed: {e}"
