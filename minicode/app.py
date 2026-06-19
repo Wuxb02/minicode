@@ -1055,6 +1055,7 @@ class minicodeApp(App):
                 "set_conversation": self._set_conversation,
                 "clear_chat": self._clear_chat,
                 "render_restored": self._render_restored_messages,
+                "show_session_selector": self._show_session_selector,
                 "skill_loader": self.skill_loader,
                 "skill_executor": self.skill_executor,
             },
@@ -1326,7 +1327,7 @@ class minicodeApp(App):
             self.agent.memory_recall_task = prefetch_task
             self.agent._memory_recall_consumed = False
 
-        history_cursor = len(self.conversation.history)
+        history_cursor: int | None = None  # 延迟到 agent.run() 首次事件后设置（此时 inject_* 已完成）
 
         # 准备 AI 回复区域
         ai_row = Vertical(classes="ai-row")
@@ -1360,6 +1361,9 @@ class minicodeApp(App):
 
         try:
             async for event in self.agent.run(self.conversation):
+                if history_cursor is None:
+                    history_cursor = len(self.conversation.history)
+
                 if isinstance(event, ThinkingText):
                     self.call_after_refresh(chat.scroll_end, animate=False)
 
@@ -1644,6 +1648,58 @@ class minicodeApp(App):
             else:
                 self._show_system_message("Type your feedback and send.")
 
+    async def _show_session_selector(self, metas: list) -> None:
+        """挂载交互式会话选择器到 chat area 底部。"""
+        from minicode.session_dialog import InlineResumeWidget
+
+        chat = self.query_one("#chat-area", VerticalScroll)
+        widget = InlineResumeWidget(metas)
+        await chat.mount(widget)
+        self.call_after_refresh(chat.scroll_end, animate=False)
+        try:
+            self.query_one("#chat-input").disabled = True
+        except Exception:
+            pass
+
+    def on_inline_resume_widget_selected(
+        self, event: "InlineResumeWidget.Selected"
+    ) -> None:
+        from minicode.conversation import ConversationManager
+        from minicode.session_dialog import InlineResumeWidget
+
+        try:
+            self.query_one("#resume-inline", InlineResumeWidget).remove()
+        except Exception:
+            pass
+        try:
+            self.query_one("#chat-input").disabled = False
+            self.query_one("#chat-input").focus()
+        except Exception:
+            pass
+
+        session_id = event.session_id
+        if session_id is None:
+            return
+
+        result = self.session_manager.resume(session_id)
+        if result is None:
+            self._show_system_message(f"会话未找到: {session_id}")
+            return
+
+        if self.session:
+            self.session.close()
+        self._set_session(result.session)
+        conv = ConversationManager()
+        for msg in result.messages:
+            conv.history.append(msg)
+        self._set_conversation(conv)
+        if self.agent:
+            self.agent._loop_count = 0
+        asyncio.create_task(self._render_restored_messages(result.messages))
+        self._show_system_message(
+            f"会话已恢复: {session_id} ({result.session.meta.message_count} msgs)"
+        )
+
     async def _handle_askuser(self, event: AskUserEvent) -> None:
         from minicode.askuser_dialog import InlineAskUserWidget
 
@@ -1812,22 +1868,107 @@ class minicodeApp(App):
         chat = self.query_one("#chat-area", VerticalScroll)
         await chat.remove_children()
 
+        tool_blocks: dict[str, ToolCallBlock] = {}
+        current_ai_row: Vertical | None = None
+        collapsible_in_row: list[tuple[str, ToolCallBlock]] = []
+        _last_user_content = ""
+
+        def _flush_collapsible() -> None:
+            nonlocal collapsible_in_row, current_ai_row
+            if len(collapsible_in_row) >= 2:
+                total = sum(b._elapsed for _, b in collapsible_in_row)
+                summary = ToolGroupSummary(
+                    len(collapsible_in_row), total,
+                    classes="tool-block tool-group-summary",
+                )
+                for _, blk in collapsible_in_row:
+                    blk.display = False
+                if current_ai_row is not None:
+                    current_ai_row.mount(summary)
+            collapsible_in_row = []
+
         for msg in messages:
-            if msg.tool_results or not msg.content:
+            # 工具结果消息（role=user, content 为空，仅有 tool_results）
+            if msg.role == "user" and msg.tool_results and not msg.content:
+                for tr in msg.tool_results:
+                    block = tool_blocks.get(tr.tool_use_id)
+                    if block is not None:
+                        block.set_result(tr.content, tr.is_error, 0.0)
                 continue
+
+            # 跳过既无内容也无工具调用的空消息
+            if not msg.content and not msg.tool_uses:
+                continue
+
             if msg.role == "user":
+                content = msg.content
+
+                # 跳过系统注入消息（仅 LLM 上下文，非用户输入）
+                if content.startswith("<system-reminder>"):
+                    continue
+                if content.startswith("Current working directory:"):
+                    continue
+
+                # 跳过连续重复的用户消息（历史持久化 bug 遗留数据去重）
+                if content == _last_user_content:
+                    continue
+                _last_user_content = content
+
+                # 压缩边界摘要消息渲染为系统消息
+                if "本次会话延续自之前的对话" in content:
+                    self._show_system_message(content)
+                    continue
+
+                _flush_collapsible()
+                current_ai_row = None
+
                 row = Vertical(classes="user-row")
                 await chat.mount(row)
                 user_rich = RichText()
                 user_rich.append("❯ ", style="bold color(80)")
-                user_rich.append(msg.content, style="bold color(255)")
+                user_rich.append(content, style="bold color(255)")
                 bubble = Static(user_rich, classes="message user-message")
                 await row.mount(bubble)
+
             elif msg.role == "assistant":
+                _flush_collapsible()
+
                 row = Vertical(classes="ai-row")
                 await chat.mount(row)
-                md = Markdown(msg.content, classes="message ai-message")
-                await row.mount(md)
+                current_ai_row = row
+
+                # 渲染文本内容（带 ● 前缀，与实时渲染一致）
+                if msg.content:
+                    prefix = Static(
+                        RichText("●  ", style="bold color(99)"),
+                        classes="message",
+                    )
+                    await row.mount(prefix)
+                    md = Markdown(msg.content, classes="message ai-message")
+                    await row.mount(md)
+
+                # 渲染工具调用块
+                for tu in msg.tool_uses:
+                    if _is_subagent_tool(tu.tool_name):
+                        agent_type = tu.arguments.get("subagent_type", "")
+                        desc = tu.arguments.get("description", "")
+                        block: ToolCallBlock | SubAgentBlock = SubAgentBlock(
+                            agent_type or "agent",
+                            desc,
+                            classes="tool-block subagent-block",
+                        )
+                    else:
+                        block = ToolCallBlock(
+                            tu.tool_name, tu.arguments, classes="tool-block",
+                        )
+                    await row.mount(block)
+                    tool_blocks[tu.tool_use_id] = block
+
+                    if (isinstance(block, ToolCallBlock)
+                            and block.tool_name in COLLAPSIBLE_TOOLS):
+                        collapsible_in_row.append((tu.tool_use_id, block))
+
+        _flush_collapsible()
 
         self.call_after_refresh(chat.scroll_end, animate=False)
 

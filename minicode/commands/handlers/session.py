@@ -14,48 +14,18 @@ async def handle_session(ctx: CommandContext) -> None:
     sub = parts[0] if parts else ""
 
     if sub == "":
-        if ctx.session:
-            m = ctx.session.meta
-            ts = m.last_active.strftime("%Y-%m-%d %H:%M")
-            ctx.ui.add_system_message(
-                f"当前会话: {m.id}\n"
-                f"  标题: {m.title or '(未命名)'}\n"
-                f"  消息: {m.message_count} 条\n"
-                f"  Token: {m.total_tokens:,}\n"
-                f"  最后活跃: {ts}"
-            )
-        else:
-            ctx.ui.add_system_message("当前没有活跃会话")
+        # 无参数：显示交互式会话选择器
+        await _show_selector(ctx)
         return
 
     if sub == "list":
-        metas = sm.list()
-        if not metas:
-            ctx.ui.add_system_message("没有已保存的会话。")
-            return
-        lines: list[str] = ["会话列表："]
-        for m in metas[:10]:
-            ts = m.last_active.strftime("%Y-%m-%d %H:%M")
-            title = m.title or "(未命名)"
-            lines.append(f"  {m.id}  {title}  [{m.message_count} msgs, {ts}]")
-        ctx.ui.add_system_message("\n".join(lines))
+        await _show_selector(ctx)
+        return
 
-    elif sub == "resume":
+    if sub == "resume":
         session_id = parts[1].strip() if len(parts) > 1 else ""
         if not session_id:
-            metas = sm.list()
-            if not metas:
-                ctx.ui.add_system_message("没有已保存的会话。")
-                return
-            lines: list[str] = [
-                "可恢复的会话（使用 /session resume <id> 或 /session resume <序号>）："]
-            for i, m in enumerate(metas[:15], 1):
-                ts = m.last_active.strftime("%Y-%m-%d %H:%M")
-                title = m.title or "(未命名)"
-                lines.append(
-                    f"  {i}. [{m.id[:8]}]  {title}  ({m.message_count} msgs, {ts})")
-            ctx.ui.add_system_message("\n".join(lines))
-            ctx.config["_resume_candidates"] = [m.id for m in metas[:15]]
+            await _show_selector(ctx)
             return
         candidates = ctx.config.get("_resume_candidates", [])
         if session_id.isdigit() and candidates:
@@ -94,7 +64,7 @@ async def handle_session(ctx: CommandContext) -> None:
     elif sub == "delete":
         session_id = parts[1].strip() if len(parts) > 1 else ""
         if not session_id:
-            ctx.ui.add_system_message("用法: /session delete <id>")
+            ctx.ui.add_system_message("用法: /sessions delete <id>")
             return
         if ctx.session and ctx.session.session_id == session_id:
             ctx.ui.add_system_message("不能删除当前活跃的会话。")
@@ -106,14 +76,26 @@ async def handle_session(ctx: CommandContext) -> None:
 
     else:
         ctx.ui.add_system_message(
-            "用法: /session [list | resume <id> | new | delete <id>]"
+            "用法: /sessions [list | resume <id> | new | delete <id>]"
         )
 
 
+async def _show_selector(ctx: CommandContext) -> None:
+    """显示交互式会话选择器，由选择事件驱动后续恢复流程。"""
+    sm = ctx.session_manager
+    metas = sm.list()
+    if not metas:
+        ctx.ui.add_system_message("没有已保存的会话。")
+        return
+    show_selector = ctx.config.get("show_session_selector")
+    if show_selector:
+        await show_selector(metas)
+
+
 SESSION_COMMAND = Command(
-    name="session",
+    name="sessions",
     description="会话管理",
-    usage="/session [list | resume <id> | new | delete <id>]",
+    usage="/sessions [list | resume <id> | new | delete <id>]",
     type=CommandType.LOCAL,
     handler=handle_session,
 )

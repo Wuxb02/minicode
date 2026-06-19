@@ -463,7 +463,7 @@ class TestRegisterAllCommands:
         names = {c.name for c in cmds}
         expected = {
             "help", "compact", "clear", "plan",
-            "session", "mcp", "memory", "permission",
+            "sessions", "mcp", "memory", "permission",
             "rewind", "status", "skill",
         }
         assert names == expected
